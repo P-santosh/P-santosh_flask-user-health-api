@@ -11,6 +11,11 @@ pipeline {
         // SonarCloud
         SONAR_PROJECT_KEY = "P-santosh_P-santosh_flask-user-health-api"
         SONAR_ORG = "p-santosh"
+        SONAR_HOST_URL = "https://sonarcloud.io"
+
+        // Sonar Scanner version
+        SONAR_SCANNER_VERSION = "5.0.1.3006"
+        SONAR_SCANNER_DIR = ".sonar/sonar-scanner"
     }
 
     options {
@@ -96,7 +101,6 @@ pipeline {
             }
         }
 
-        // ✅ FIXED TEST STAGE
         stage('5. Run Automated Tests') {
             steps {
                 sh '''
@@ -107,9 +111,38 @@ pipeline {
                     export PYTHONPATH=$WORKSPACE
 
                     echo "Running pytest..."
-                    pytest -q --junitxml=test-results.xml || exit 1
+                    pytest -q --junitxml=test-results.xml
 
                     echo "✅ Tests completed"
+                '''
+            }
+        }
+
+        // ✅ NEW STAGE: Install Sonar Scanner CLI automatically
+        stage('6A. Install SonarScanner CLI') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "Installing SonarScanner CLI locally in workspace..."
+
+                    mkdir -p .sonar
+
+                    if [ ! -d "${SONAR_SCANNER_DIR}" ]; then
+                        echo "Downloading SonarScanner..."
+                        curl -L -o .sonar/sonar-scanner.zip \
+                          "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_SCANNER_VERSION}-macosx.zip"
+
+                        unzip -o .sonar/sonar-scanner.zip -d .sonar
+
+                        # rename extracted folder to consistent path
+                        mv .sonar/sonar-scanner-${SONAR_SCANNER_VERSION}-macosx ${SONAR_SCANNER_DIR}
+                    else
+                        echo "SonarScanner already exists in workspace. Skipping download."
+                    fi
+
+                    chmod +x ${SONAR_SCANNER_DIR}/bin/sonar-scanner
+                    ${SONAR_SCANNER_DIR}/bin/sonar-scanner --version
                 '''
             }
         }
@@ -122,13 +155,11 @@ pipeline {
                         sh '''
                             set -e
 
-                            echo "Sonar Scanner version:"
-                            sonar-scanner --version || true
-
-                            sonar-scanner \
+                            echo "Running sonar scan..."
+                            ${SONAR_SCANNER_DIR}/bin/sonar-scanner \
                               -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
                               -Dsonar.organization=${SONAR_ORG} \
-                              -Dsonar.host.url=https://sonarcloud.io \
+                              -Dsonar.host.url=${SONAR_HOST_URL} \
                               -Dsonar.login=$SONAR_TOKEN
                         '''
                     }
