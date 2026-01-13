@@ -1,0 +1,10 @@
+services:
+  api:
+    image: flask-user-health-api:staging
+    container_name: flask-user-health-api-staging
+    ports:
+      - "5001:5000"
+    environment:
+      - FLASK_ENV=staging
+      - SECRET_KEY=change-this-in-jenkins
+    restart: always

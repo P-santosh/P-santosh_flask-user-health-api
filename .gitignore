@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+coverage.xml
+test-results.xml
+*.log
+bandit-report.json
+pip-audit-report.json
+trivy-image-report.json
