@@ -2,14 +2,15 @@ pipeline {
     agent any
 
     environment {
-        // --- SonarCloud ---
-        SONAR_PROJECT_KEY = "P-santosh_P-santosh_flask-user-health-api"
-        SONAR_ORG         = "p-santosh"   // <--- IMPORTANT: replace with your SonarCloud organization key
-        SONAR_HOST_URL    = "https://sonarcloud.io"
+        VENV_DIR = ".venv"
+        APP_NAME = "flask-user-health-api"
 
-        // Jenkins Credentials ID where you stored token:
-        // Manage Jenkins → Credentials → add "Secret text" → ID = sonar-token
-        SONAR_TOKEN = credentials('sonar-token')
+        // Docker image name (local)
+        DOCKER_IMAGE = "sit753/flask-user-health-api:${BUILD_NUMBER}"
+
+        // SonarCloud
+        SONAR_PROJECT_KEY = "P-santosh_P-santosh_flask-user-health-api"
+        SONAR_ORG = "p-santosh"
     }
 
     options {
@@ -19,195 +20,251 @@ pipeline {
 
     stages {
 
+        // =======================
+        // 1) CHECKOUT
+        // =======================
         stage('1. Checkout Source') {
             steps {
                 echo "Checking out code from SCM..."
                 checkout scm
-                sh 'ls -la'
+                sh "ls -la"
             }
         }
 
+        // =======================
+        // 2) SETUP PYTHON VENV
+        // =======================
         stage('2. Setup Python venv') {
             steps {
                 sh '''
                     set -e
-                    echo "Finding Python..."
-                    (python3 --version) || (python --version)
 
-                    PYTHON_BIN=$(command -v python3 || command -v python)
+                    echo "Detecting python..."
+                    if command -v python3.11 >/dev/null 2>&1; then
+                        PY=python3.11
+                    elif command -v python3.10 >/dev/null 2>&1; then
+                        PY=python3.10
+                    elif command -v python3 >/dev/null 2>&1; then
+                        PY=python3
+                    elif command -v python >/dev/null 2>&1; then
+                        PY=python
+                    else
+                        echo "❌ ERROR: Python not found on Jenkins agent."
+                        exit 1
+                    fi
 
-                    echo "Python found at: $PYTHON_BIN"
-                    $PYTHON_BIN -m venv .venv
+                    echo "Using Python: $PY"
+                    $PY --version
 
-                    . .venv/bin/activate
-                    python -m pip install --upgrade pip wheel setuptools
+                    echo "Creating venv..."
+                    $PY -m venv ${VENV_DIR}
+
+                    echo "Activating venv..."
+                    . ${VENV_DIR}/bin/activate
+
+                    python --version
+                    pip --version
+                    pip install --upgrade pip
                 '''
             }
         }
 
+        // =======================
+        // 3) INSTALL REQUIREMENTS
+        // =======================
         stage('3. Install Requirements') {
             steps {
                 sh '''
                     set -e
-                    . .venv/bin/activate
+                    . ${VENV_DIR}/bin/activate
 
-                    if [ -f requirements.txt ]; then
-                        pip install -r requirements.txt
-                    fi
-
+                    echo "Installing requirements..."
+                    pip install -r requirements.txt
                     if [ -f requirements-dev.txt ]; then
                         pip install -r requirements-dev.txt
-                    else
-                        # fallback dev tools
-                        pip install pytest pytest-cov flake8 bandit
                     fi
                 '''
             }
         }
 
+        // =======================
+        // 4) BUILD ARTEFACT
+        // =======================
         stage('4. Build Artefact') {
             steps {
                 sh '''
                     set -e
+
                     echo "Creating build artefact..."
+                    rm -rf dist
+                    mkdir -p dist
 
-                    mkdir -p artefact
-                    tar -czf artefact/flask-user-health-api.tar.gz \
-                        app.py requirements.txt Dockerfile tests README.md || true
+                    tar -czf dist/${APP_NAME}-build-${BUILD_NUMBER}.tar.gz \
+                        app.py requirements.txt Dockerfile tests || true
 
-                    ls -la artefact
+                    echo "Build artefact created:"
+                    ls -la dist
                 '''
             }
         }
 
+        // =======================
+        // 5) TEST
+        // =======================
         stage('5. Run Automated Tests') {
             steps {
                 sh '''
                     set -e
-                    . .venv/bin/activate
+                    . ${VENV_DIR}/bin/activate
 
                     echo "Running pytest..."
-                    pytest -q --disable-warnings --maxfail=1 \
-                      --junitxml=test-results.xml \
-                      --cov=app --cov-report=xml:coverage.xml --cov-report=term || true
+                    pip install pytest pytest-cov
+
+                    pytest -q --junitxml=test-results.xml || exit 1
+
+                    echo "✅ Tests completed"
                 '''
             }
-            post {
-                always {
-                    junit allowEmptyResults: true, testResults: 'test-results.xml'
-                    archiveArtifacts artifacts: 'test-results.xml,coverage.xml', allowEmptyArchive: true
+        }
+
+        // =======================
+        // 6) CODE QUALITY - SONARCLOUD
+        // =======================
+        stage('6. Code Quality Analysis (SonarCloud)') {
+            steps {
+                script {
+                    echo "Running SonarCloud scan..."
+
+                    // Sonar scanner should be installed in Jenkins system,
+                    // OR we can install it in venv using pip (not best).
+                    // We'll assume sonar-scanner exists.
+                    withCredentials([string(credentialsId: 'SONAR_TOKEN_NEW', variable: 'SONAR_TOKEN')]) {
+                        sh '''
+                            set -e
+                            echo "Sonar Scanner version:"
+                            sonar-scanner --version || true
+
+                            sonar-scanner \
+                              -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                              -Dsonar.organization=${SONAR_ORG} \
+                              -Dsonar.host.url=https://sonarcloud.io \
+                              -Dsonar.login=$SONAR_TOKEN
+                        '''
+                    }
                 }
             }
         }
 
-        stage('6. Code Quality Analysis (Flake8)') {
+        // =======================
+        // 7) SECURITY ANALYSIS
+        // =======================
+        stage('7. Security Analysis') {
             steps {
                 sh '''
                     set -e
-                    . .venv/bin/activate
-                    echo "Running flake8 code quality check..."
-                    flake8 . --count --statistics || true
-                '''
-            }
-        }
+                    . ${VENV_DIR}/bin/activate
 
-        stage('7. Security Analysis (Bandit + pip-audit)') {
-            steps {
-                sh '''
-                    set -e
-                    . .venv/bin/activate
+                    echo "Installing Bandit + pip-audit..."
+                    pip install bandit pip-audit
 
-                    echo "Running Bandit..."
+                    echo "Running Bandit security scan..."
                     bandit -r . -f json -o bandit-report.json || true
+                    bandit -r . -f txt -o bandit-report.txt || true
 
-                    echo "Running pip-audit..."
-                    pip install pip-audit >/dev/null 2>&1 || true
+                    echo "Running pip-audit dependency scan..."
                     pip-audit -f json -o pip-audit-report.json || true
+
+                    echo "✅ Security scanning completed"
+                    ls -la *.json *.txt || true
                 '''
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'bandit-report.json,pip-audit-report.json', allowEmptyArchive: true
-                }
             }
         }
 
+        // =======================
+        // 8) DEPLOY TO TEST (STAGING)
+        // =======================
         stage('8. Deploy to Test Environment (Docker)') {
             steps {
                 sh '''
                     set -e
-                    echo "Deploying to staging using Docker Compose..."
-                    docker --version
-                    docker compose version
 
-                    # Staging deploy
-                    docker compose -f docker-compose.staging.yml up -d --build
-                    docker compose -f docker-compose.staging.yml ps
+                    echo "Building Docker image..."
+                    docker --version
+                    docker build -t ${DOCKER_IMAGE} .
+
+                    echo "Deploying to STAGING using docker-compose..."
+                    if [ -f docker-compose.staging.yml ]; then
+                        docker compose -f docker-compose.staging.yml up -d --build
+                    else
+                        echo "No docker-compose.staging.yml found, skipping compose deploy."
+                    fi
                 '''
             }
         }
 
-        stage('9. Release to Production (Docker)') {
+        // =======================
+        // 9) RELEASE TO PRODUCTION
+        // =======================
+        stage('9. Release to Production') {
             steps {
                 sh '''
                     set -e
-                    echo "Releasing to production..."
-                    docker compose -f docker-compose.prod.yml up -d --build
-                    docker compose -f docker-compose.prod.yml ps
+
+                    echo "Promoting build to production..."
+                    if [ -f docker-compose.prod.yml ]; then
+                        docker compose -f docker-compose.prod.yml up -d --build
+                    else
+                        echo "No docker-compose.prod.yml found, skipping production compose deploy."
+                    fi
                 '''
             }
         }
 
+        // =======================
+        // 10) MONITORING & ALERTING
+        // =======================
         stage('10. Monitoring & Alerting') {
             steps {
                 sh '''
                     set -e
                     echo "Monitoring stage..."
-                    echo "Checking container health..."
-                    docker ps
 
-                    echo "Health check curl (example):"
-                    curl -sSf http://localhost:5000/health || true
-                '''
-            }
-        }
+                    echo "Docker running containers:"
+                    docker ps || true
 
-        stage('SonarCloud Analysis (Runs after quality)') {
-            steps {
-                sh '''
-                    set -e
-                    echo "Running SonarCloud scan..."
+                    echo "Health check endpoint (if app running):"
+                    curl -s -o /dev/null -w "HTTP Status: %{http_code}\\n" http://localhost:5000/health || true
 
-                    # Install sonar-scanner locally
-                    npm --version || true
-                    if ! command -v sonar-scanner >/dev/null 2>&1; then
-                        npm install -g sonar-scanner
-                    fi
-
-                    sonar-scanner \
-                      -Dsonar.projectKey=$SONAR_PROJECT_KEY \
-                      -Dsonar.organization=$SONAR_ORG \
-                      -Dsonar.host.url=$SONAR_HOST_URL \
-                      -Dsonar.token=$SONAR_TOKEN \
-                      -Dsonar.python.coverage.reportPaths=coverage.xml
+                    echo "✅ Monitoring check done"
                 '''
             }
         }
     }
 
+    // =======================
+    // POST ACTIONS
+    // =======================
     post {
         always {
-            echo "Archiving artifacts + reports..."
-            archiveArtifacts artifacts: 'artefact/*.tar.gz,bandit-report.json,pip-audit-report.json,test-results.xml,coverage.xml', allowEmptyArchive: true
+            // Must be inside node context -> FIXES your MissingContextVariableException
+            script {
+                echo "Archiving artifacts + reports..."
+
+                archiveArtifacts artifacts: 'dist/**', allowEmptyArchive: true
+                archiveArtifacts artifacts: '*.xml,*.json,*.txt', allowEmptyArchive: true
+            }
         }
+
         success {
-            echo "✅ SUCCESS: Pipeline completed successfully."
+            echo "✅ SUCCESS: Pipeline completed."
         }
+
         failure {
             echo "❌ FAILURE: Pipeline failed. Check console output."
         }
     }
 }
+
 
 
 
