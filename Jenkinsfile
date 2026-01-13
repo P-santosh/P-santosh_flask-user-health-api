@@ -20,9 +20,6 @@ pipeline {
 
     stages {
 
-        // =======================
-        // 1) CHECKOUT
-        // =======================
         stage('1. Checkout Source') {
             steps {
                 echo "Checking out code from SCM..."
@@ -31,9 +28,6 @@ pipeline {
             }
         }
 
-        // =======================
-        // 2) SETUP PYTHON VENV
-        // =======================
         stage('2. Setup Python venv') {
             steps {
                 sh '''
@@ -69,9 +63,6 @@ pipeline {
             }
         }
 
-        // =======================
-        // 3) INSTALL REQUIREMENTS
-        // =======================
         stage('3. Install Requirements') {
             steps {
                 sh '''
@@ -87,9 +78,6 @@ pipeline {
             }
         }
 
-        // =======================
-        // 4) BUILD ARTEFACT
-        // =======================
         stage('4. Build Artefact') {
             steps {
                 sh '''
@@ -108,18 +96,17 @@ pipeline {
             }
         }
 
-        // =======================
-        // 5) TEST
-        // =======================
+        // ✅ FIXED TEST STAGE
         stage('5. Run Automated Tests') {
             steps {
                 sh '''
                     set -e
                     . ${VENV_DIR}/bin/activate
 
-                    echo "Running pytest..."
-                    pip install pytest pytest-cov
+                    echo "Setting PYTHONPATH to workspace so tests can import app.py"
+                    export PYTHONPATH=$WORKSPACE
 
+                    echo "Running pytest..."
                     pytest -q --junitxml=test-results.xml || exit 1
 
                     echo "✅ Tests completed"
@@ -127,20 +114,14 @@ pipeline {
             }
         }
 
-        // =======================
-        // 6) CODE QUALITY - SONARCLOUD
-        // =======================
         stage('6. Code Quality Analysis (SonarCloud)') {
             steps {
                 script {
                     echo "Running SonarCloud scan..."
-
-                    // Sonar scanner should be installed in Jenkins system,
-                    // OR we can install it in venv using pip (not best).
-                    // We'll assume sonar-scanner exists.
                     withCredentials([string(credentialsId: 'SONAR_TOKEN_NEW', variable: 'SONAR_TOKEN')]) {
                         sh '''
                             set -e
+
                             echo "Sonar Scanner version:"
                             sonar-scanner --version || true
 
@@ -155,17 +136,11 @@ pipeline {
             }
         }
 
-        // =======================
-        // 7) SECURITY ANALYSIS
-        // =======================
         stage('7. Security Analysis') {
             steps {
                 sh '''
                     set -e
                     . ${VENV_DIR}/bin/activate
-
-                    echo "Installing Bandit + pip-audit..."
-                    pip install bandit pip-audit
 
                     echo "Running Bandit security scan..."
                     bandit -r . -f json -o bandit-report.json || true
@@ -180,9 +155,6 @@ pipeline {
             }
         }
 
-        // =======================
-        // 8) DEPLOY TO TEST (STAGING)
-        // =======================
         stage('8. Deploy to Test Environment (Docker)') {
             steps {
                 sh '''
@@ -202,9 +174,6 @@ pipeline {
             }
         }
 
-        // =======================
-        // 9) RELEASE TO PRODUCTION
-        // =======================
         stage('9. Release to Production') {
             steps {
                 sh '''
@@ -220,9 +189,6 @@ pipeline {
             }
         }
 
-        // =======================
-        // 10) MONITORING & ALERTING
-        // =======================
         stage('10. Monitoring & Alerting') {
             steps {
                 sh '''
@@ -232,7 +198,7 @@ pipeline {
                     echo "Docker running containers:"
                     docker ps || true
 
-                    echo "Health check endpoint (if app running):"
+                    echo "Health check endpoint:"
                     curl -s -o /dev/null -w "HTTP Status: %{http_code}\\n" http://localhost:5000/health || true
 
                     echo "✅ Monitoring check done"
@@ -241,29 +207,23 @@ pipeline {
         }
     }
 
-    // =======================
-    // POST ACTIONS
-    // =======================
     post {
         always {
-            // Must be inside node context -> FIXES your MissingContextVariableException
             script {
                 echo "Archiving artifacts + reports..."
-
                 archiveArtifacts artifacts: 'dist/**', allowEmptyArchive: true
                 archiveArtifacts artifacts: '*.xml,*.json,*.txt', allowEmptyArchive: true
             }
         }
-
         success {
             echo "✅ SUCCESS: Pipeline completed."
         }
-
         failure {
             echo "❌ FAILURE: Pipeline failed. Check console output."
         }
     }
 }
+
 
 
 
