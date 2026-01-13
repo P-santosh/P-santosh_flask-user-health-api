@@ -2,13 +2,14 @@ pipeline {
     agent any
 
     environment {
-        VENV_DIR   = "venv"
-        PYTHON_BIN = "python3.11"
-        REPORTS    = "reports"
-        APP_PORT   = "5000"
-        IMAGE_NAME = "my-python-app"
-        DOCKER_CONTAINER_TEST = "myapp_test"
-        DOCKER_CONTAINER_PROD = "myapp_prod"
+        // --- SonarCloud ---
+        SONAR_PROJECT_KEY = "P-santosh_P-santosh_flask-user-health-api"
+        SONAR_ORG         = "p-santosh"   // <--- IMPORTANT: replace with your SonarCloud organization key
+        SONAR_HOST_URL    = "https://sonarcloud.io"
+
+        // Jenkins Credentials ID where you stored token:
+        // Manage Jenkins → Credentials → add "Secret text" → ID = sonar-token
+        SONAR_TOKEN = credentials('sonar-token')
     }
 
     options {
@@ -18,7 +19,6 @@ pipeline {
 
     stages {
 
-        // 1) SCM Checkout
         stage('1. Checkout Source') {
             steps {
                 echo "Checking out code from SCM..."
@@ -27,196 +27,187 @@ pipeline {
             }
         }
 
-        // 2) Setup Environment
         stage('2. Setup Python venv') {
             steps {
-                sh """
+                sh '''
                     set -e
-                    ${PYTHON_BIN} --version
-                    ${PYTHON_BIN} -m venv ${VENV_DIR}
-                    . ${VENV_DIR}/bin/activate
-                    pip install --upgrade pip setuptools wheel
-                    mkdir -p ${REPORTS}
-                """
+                    echo "Finding Python..."
+                    (python3 --version) || (python --version)
+
+                    PYTHON_BIN=$(command -v python3 || command -v python)
+
+                    echo "Python found at: $PYTHON_BIN"
+                    $PYTHON_BIN -m venv .venv
+
+                    . .venv/bin/activate
+                    python -m pip install --upgrade pip wheel setuptools
+                '''
             }
         }
 
-        // 3) Install Dependencies
         stage('3. Install Requirements') {
             steps {
-                sh """
+                sh '''
                     set -e
-                    . ${VENV_DIR}/bin/activate
+                    . .venv/bin/activate
+
                     if [ -f requirements.txt ]; then
-                      pip install -r requirements.txt | tee ${REPORTS}/pip_install_log.txt
-                    else
-                      echo "requirements.txt not found" | tee ${REPORTS}/pip_install_log.txt
+                        pip install -r requirements.txt
                     fi
-                """
+
+                    if [ -f requirements-dev.txt ]; then
+                        pip install -r requirements-dev.txt
+                    else
+                        # fallback dev tools
+                        pip install pytest pytest-cov flake8 bandit
+                    fi
+                '''
             }
         }
 
-        // 4) BUILD STAGE (Artefact)
         stage('4. Build Artefact') {
             steps {
-                echo "BUILD: Creating build artefact..."
-                sh """
+                sh '''
                     set -e
-                    mkdir -p dist ${REPORTS}
-                    BUILD_NAME="build_\$(date +%Y%m%d_%H%M%S).zip"
+                    echo "Creating build artefact..."
 
-                    # Create zip artefact excluding venv + git
-                    zip -r dist/\$BUILD_NAME . -x "${VENV_DIR}/*" ".git/*" "dist/*" || true
+                    mkdir -p artefact
+                    tar -czf artefact/flask-user-health-api.tar.gz \
+                        app.py requirements.txt Dockerfile tests README.md || true
 
-                    echo "✅ Build artefact created: dist/\$BUILD_NAME" | tee ${REPORTS}/build_log.txt
-                """
-                archiveArtifacts artifacts: 'dist/**', allowEmptyArchive: false
+                    ls -la artefact
+                '''
             }
         }
 
-        // 5) TEST STAGE
         stage('5. Run Automated Tests') {
             steps {
-                echo "TEST: Running automated tests using PyTest..."
-                sh """
+                sh '''
                     set -e
-                    . ${VENV_DIR}/bin/activate
-                    pip install pytest
+                    . .venv/bin/activate
 
-                    if [ -d tests ]; then
-                      pytest -q --disable-warnings --maxfail=1 | tee ${REPORTS}/pytest_report.txt
-                    else
-                      echo "⚠️ tests folder not found. No tests executed." | tee ${REPORTS}/pytest_report.txt
-                    fi
-                """
+                    echo "Running pytest..."
+                    pytest -q --disable-warnings --maxfail=1 \
+                      --junitxml=test-results.xml \
+                      --cov=app --cov-report=xml:coverage.xml --cov-report=term || true
+                '''
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: 'test-results.xml'
+                    archiveArtifacts artifacts: 'test-results.xml,coverage.xml', allowEmptyArchive: true
+                }
             }
         }
 
-        // 6) CODE QUALITY STAGE
-        stage('6. Code Quality Analysis') {
+        stage('6. Code Quality Analysis (Flake8)') {
             steps {
-                echo "CODE QUALITY: Flake8 + Radon complexity check..."
-                sh """
+                sh '''
                     set -e
-                    . ${VENV_DIR}/bin/activate
-
-                    pip install flake8 radon
-
-                    # Flake8: style + maintainability
-                    flake8 . --count --statistics | tee ${REPORTS}/flake8_report.txt || true
-
-                    # Radon: code complexity
-                    radon cc . -a | tee ${REPORTS}/radon_complexity_report.txt || true
-
-                    echo "✅ Code quality stage completed" | tee -a ${REPORTS}/code_quality_summary.txt
-                """
+                    . .venv/bin/activate
+                    echo "Running flake8 code quality check..."
+                    flake8 . --count --statistics || true
+                '''
             }
         }
 
-        // 7) SECURITY STAGE
-        stage('7. Security Analysis') {
+        stage('7. Security Analysis (Bandit + pip-audit)') {
             steps {
-                echo "SECURITY: Bandit + pip-audit..."
-                sh """
+                sh '''
                     set -e
-                    . ${VENV_DIR}/bin/activate
+                    . .venv/bin/activate
 
-                    pip install bandit pip-audit
+                    echo "Running Bandit..."
+                    bandit -r . -f json -o bandit-report.json || true
 
-                    # Bandit for code security scanning
-                    bandit -r . -ll -f txt | tee ${REPORTS}/bandit_report.txt || true
-
-                    # pip-audit scans python dependencies for CVEs
-                    pip-audit | tee ${REPORTS}/pip_audit_report.txt || true
-
-                    echo "✅ Security scan completed (check reports for findings)" | tee ${REPORTS}/security_summary.txt
-                """
+                    echo "Running pip-audit..."
+                    pip install pip-audit >/dev/null 2>&1 || true
+                    pip-audit -f json -o pip-audit-report.json || true
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'bandit-report.json,pip-audit-report.json', allowEmptyArchive: true
+                }
             }
         }
 
-        // 8) DEPLOY STAGE (Test Environment)
         stage('8. Deploy to Test Environment (Docker)') {
             steps {
-                echo "DEPLOY: Deploying app to test environment using Docker..."
-                sh """
+                sh '''
                     set -e
+                    echo "Deploying to staging using Docker Compose..."
                     docker --version
+                    docker compose version
 
-                    # Create minimal Dockerfile if not present
-                    if [ ! -f Dockerfile ]; then
-                      cat > Dockerfile << 'EOF'
-FROM python:3.11-slim
-WORKDIR /app
-COPY . /app
-RUN pip install --no-cache-dir -r requirements.txt
-EXPOSE 5000
-CMD ["python", "app.py"]
-EOF
-                    fi
-
-                    docker build -t ${IMAGE_NAME}:test .
-
-                    # Stop old container if exists
-                    docker rm -f ${DOCKER_CONTAINER_TEST} || true
-
-                    docker run -d --name ${DOCKER_CONTAINER_TEST} -p ${APP_PORT}:5000 ${IMAGE_NAME}:test
-                    sleep 5
-                """
+                    # Staging deploy
+                    docker compose -f docker-compose.staging.yml up -d --build
+                    docker compose -f docker-compose.staging.yml ps
+                '''
             }
         }
 
-        // 9) RELEASE STAGE (Promote to Production)
-        stage('9. Release to Production') {
+        stage('9. Release to Production (Docker)') {
             steps {
-                echo "RELEASE: Promoting image to production tag..."
-                sh """
+                sh '''
                     set -e
-                    docker tag ${IMAGE_NAME}:test ${IMAGE_NAME}:release
-
-                    # Stop prod if exists
-                    docker rm -f ${DOCKER_CONTAINER_PROD} || true
-
-                    docker run -d --name ${DOCKER_CONTAINER_PROD} -p 5001:5000 ${IMAGE_NAME}:release
-                    sleep 5
-                """
+                    echo "Releasing to production..."
+                    docker compose -f docker-compose.prod.yml up -d --build
+                    docker compose -f docker-compose.prod.yml ps
+                '''
             }
         }
 
-        // 10) Monitoring and Alerting Stage
         stage('10. Monitoring & Alerting') {
             steps {
-                echo "MONITORING: Checking health endpoint..."
-                sh """
+                sh '''
                     set -e
-                    mkdir -p ${REPORTS}
+                    echo "Monitoring stage..."
+                    echo "Checking container health..."
+                    docker ps
 
-                    # Try health endpoint if present, else just check root
-                    curl -s -o /dev/null -w "%{http_code}" http://localhost:5001/health > ${REPORTS}/health_http_code.txt || true
-                    CODE=\$(cat ${REPORTS}/health_http_code.txt)
+                    echo "Health check curl (example):"
+                    curl -sSf http://localhost:5000/health || true
+                '''
+            }
+        }
 
-                    if [ "\$CODE" = "200" ]; then
-                        echo "✅ Monitoring OK: /health returned 200" | tee ${REPORTS}/monitoring_report.txt
-                    else
-                        echo "⚠️ Monitoring Warning: /health did not return 200 (code=\$CODE)" | tee ${REPORTS}/monitoring_report.txt
-                        echo "ALERT: Application health check failed!" | tee -a ${REPORTS}/monitoring_report.txt
+        stage('SonarCloud Analysis (Runs after quality)') {
+            steps {
+                sh '''
+                    set -e
+                    echo "Running SonarCloud scan..."
+
+                    # Install sonar-scanner locally
+                    npm --version || true
+                    if ! command -v sonar-scanner >/dev/null 2>&1; then
+                        npm install -g sonar-scanner
                     fi
-                """
+
+                    sonar-scanner \
+                      -Dsonar.projectKey=$SONAR_PROJECT_KEY \
+                      -Dsonar.organization=$SONAR_ORG \
+                      -Dsonar.host.url=$SONAR_HOST_URL \
+                      -Dsonar.token=$SONAR_TOKEN \
+                      -Dsonar.python.coverage.reportPaths=coverage.xml
+                '''
             }
         }
     }
 
     post {
         always {
-            echo "Archiving Reports..."
-            archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
+            echo "Archiving artifacts + reports..."
+            archiveArtifacts artifacts: 'artefact/*.tar.gz,bandit-report.json,pip-audit-report.json,test-results.xml,coverage.xml', allowEmptyArchive: true
         }
         success {
             echo "✅ SUCCESS: Pipeline completed successfully."
         }
         failure {
-            echo "❌ FAILURE: Pipeline failed. Check console + reports."
+            echo "❌ FAILURE: Pipeline failed. Check console output."
         }
     }
 }
+
 
 
