@@ -39,7 +39,9 @@ pipeline {
                     set -e
 
                     echo "Detecting python..."
-                    if command -v python3.11 >/dev/null 2>&1; then
+                    if command -v python3.12 >/dev/null 2>&1; then
+                        PY=python3.12
+                    elif command -v python3.11 >/dev/null 2>&1; then
                         PY=python3.11
                     elif command -v python3.10 >/dev/null 2>&1; then
                         PY=python3.10
@@ -56,6 +58,7 @@ pipeline {
                     $PY --version
 
                     echo "Creating venv..."
+                    rm -rf ${VENV_DIR}
                     $PY -m venv ${VENV_DIR}
 
                     echo "Activating venv..."
@@ -63,7 +66,7 @@ pipeline {
 
                     python --version
                     pip --version
-                    pip install --upgrade pip
+                    pip install --upgrade pip setuptools wheel
                 '''
             }
         }
@@ -76,9 +79,13 @@ pipeline {
 
                     echo "Installing requirements..."
                     pip install -r requirements.txt
+
                     if [ -f requirements-dev.txt ]; then
                         pip install -r requirements-dev.txt
                     fi
+
+                    echo "Installing security tools (Bandit + pip-audit)..."
+                    pip install bandit pip-audit
                 '''
             }
         }
@@ -125,11 +132,11 @@ pipeline {
                     set -e
 
                     echo "Installing SonarScanner CLI locally in workspace..."
-
                     mkdir -p .sonar
 
                     if [ ! -d "${SONAR_SCANNER_DIR}" ]; then
                         echo "Downloading SonarScanner..."
+
                         curl -L -o .sonar/sonar-scanner.zip \
                           "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_SCANNER_VERSION}-macosx.zip"
 
@@ -154,8 +161,6 @@ pipeline {
                     withCredentials([string(credentialsId: 'SONAR_TOKEN_NEW', variable: 'SONAR_TOKEN')]) {
                         sh '''
                             set -e
-
-                            echo "Running sonar scan..."
                             ${SONAR_SCANNER_DIR}/bin/sonar-scanner \
                               -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
                               -Dsonar.organization=${SONAR_ORG} \
@@ -167,21 +172,35 @@ pipeline {
             }
         }
 
+        // ✅ FIXED SECURITY STAGE (BANDIT + PIP-AUDIT)
         stage('7. Security Analysis') {
             steps {
                 sh '''
-                    set -e
+                    set +e
                     . ${VENV_DIR}/bin/activate
 
-                    echo "Running Bandit security scan..."
-                    bandit -r . -f json -o bandit-report.json || true
-                    bandit -r . -f txt -o bandit-report.txt || true
+                    echo "✅ Running Bandit security scan..."
 
-                    echo "Running pip-audit dependency scan..."
-                    pip-audit -f json -o pip-audit-report.json || true
+                    # Clean old reports
+                    rm -f bandit-report.json bandit-report.txt pip-audit-report.json
+
+                    # Bandit scan only project code (avoid scanning venv + sonar folders)
+                    if [ -d "tests" ]; then
+                        bandit -r app.py tests -f json -o bandit-report.json
+                        bandit -r app.py tests -f txt  -o bandit-report.txt
+                    else
+                        bandit -r app.py -f json -o bandit-report.json
+                        bandit -r app.py -f txt  -o bandit-report.txt
+                    fi
+
+                    echo "✅ Running pip-audit dependency scan..."
+                    pip-audit -f json -o pip-audit-report.json
 
                     echo "✅ Security scanning completed"
-                    ls -la *.json *.txt || true
+                    ls -la bandit-report.* pip-audit-report.json || true
+
+                    # Do NOT fail build due to findings
+                    exit 0
                 '''
             }
         }
@@ -254,6 +273,7 @@ pipeline {
         }
     }
 }
+
 
 
 
