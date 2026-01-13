@@ -8,6 +8,9 @@ pipeline {
   }
 
   environment {
+    // ✅ IMPORTANT: PATH for Jenkins user on macOS Apple Silicon
+    PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
     // Apple Silicon Homebrew paths
     DOCKER = "/opt/homebrew/bin/docker"
     TRIVY  = "/opt/homebrew/bin/trivy"
@@ -34,6 +37,7 @@ pipeline {
       steps {
         sh '''
           set -euxo pipefail
+          which docker || true
           ${DOCKER} --version
           ${DOCKER} build -t ${IMAGE_NAME}:${IMAGE_TAG} .
         '''
@@ -45,21 +49,28 @@ pipeline {
         sh '''
           set -euxo pipefail
 
-          python3.10 -m venv .venv
+          echo "==== PYTHON INFO ===="
+          which python3 || true
+          python3 --version
+
+          echo "==== CREATE VENV ===="
+          python3 -m venv .venv
           . .venv/bin/activate
 
-          pip install --upgrade pip
+          python --version
+          pip --version
+
+          echo "==== INSTALL DEV REQS ===="
           pip install -r requirements-dev.txt
 
+          echo "==== RUN PYTEST ===="
           pytest -q --junitxml=test-results.xml --cov=app --cov-report=xml:coverage.xml || true
-
-          ls -la
         '''
       }
       post {
         always {
           junit allowEmptyResults: true, testResults: 'test-results.xml'
-          archiveArtifacts allowEmptyArchive: true, artifacts: 'test-results.xml,coverage.xml'
+          archiveArtifacts allowEmptyArchive: true, artifacts: '*.xml'
         }
       }
     }
@@ -70,7 +81,9 @@ pipeline {
           sh '''
             set -euxo pipefail
 
-            # Run Sonar Scanner container
+            echo "==== SONAR SCAN ===="
+
+            # IMPORTANT: exclude .venv to avoid scanning 5000 files
             ${DOCKER} run --rm \
               -e SONAR_TOKEN=$SONAR_TOKEN \
               -v "$PWD:/usr/src" \
@@ -79,7 +92,8 @@ pipeline {
               -Dsonar.organization=${SONAR_ORG} \
               -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
               -Dsonar.projectVersion=${IMAGE_TAG} \
-              -Dsonar.python.coverage.reportPaths=coverage.xml
+              -Dsonar.python.coverage.reportPaths=coverage.xml \
+              -Dsonar.exclusions=**/.venv/**,**/venv/**,**/__pycache__/**,**/*.pyc
           '''
         }
       }
@@ -92,7 +106,10 @@ pipeline {
 
           . .venv/bin/activate
 
+          echo "==== BANDIT ===="
           bandit -r . -x .venv,tests -f json -o bandit-report.json || true
+
+          echo "==== PIP-AUDIT ===="
           pip-audit -r requirements.txt -f json -o pip-audit-report.json || true
         '''
       }
@@ -108,9 +125,9 @@ pipeline {
         sh '''
           set -euxo pipefail
 
-          # Trivy should be installed on host
           ${TRIVY} --version
 
+          # scan image
           ${TRIVY} image --no-progress --format json -o trivy-image-report.json ${IMAGE_NAME}:${IMAGE_TAG} || true
         '''
       }
@@ -140,8 +157,19 @@ pipeline {
           echo "Waiting for service..."
           sleep 5
 
-          # Update this URL if your staging runs on different port
-          curl -fsS http://localhost:5000/health
+          echo "Checking health endpoint..."
+          for i in 1 2 3 4 5
+          do
+            if curl -fsS http://localhost:5000/health; then
+              echo "✅ Health check OK"
+              exit 0
+            fi
+            echo "Retry $i..."
+            sleep 3
+          done
+
+          echo "❌ Health check failed after retries"
+          exit 1
         '''
       }
     }
@@ -178,4 +206,3 @@ pipeline {
     }
   }
 }
-
