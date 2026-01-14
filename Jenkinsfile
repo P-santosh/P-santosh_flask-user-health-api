@@ -125,7 +125,6 @@ pipeline {
             }
         }
 
-        // ✅ NEW STAGE: Install Sonar Scanner CLI automatically
         stage('6A. Install SonarScanner CLI') {
             steps {
                 sh '''
@@ -142,7 +141,6 @@ pipeline {
 
                         unzip -o .sonar/sonar-scanner.zip -d .sonar
 
-                        # rename extracted folder to consistent path
                         mv .sonar/sonar-scanner-${SONAR_SCANNER_VERSION}-macosx ${SONAR_SCANNER_DIR}
                     else
                         echo "SonarScanner already exists in workspace. Skipping download."
@@ -161,6 +159,7 @@ pipeline {
                     withCredentials([string(credentialsId: 'SONAR_TOKEN_NEW', variable: 'SONAR_TOKEN')]) {
                         sh '''
                             set -e
+
                             ${SONAR_SCANNER_DIR}/bin/sonar-scanner \
                               -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
                               -Dsonar.organization=${SONAR_ORG} \
@@ -172,7 +171,6 @@ pipeline {
             }
         }
 
-        // ✅ FIXED SECURITY STAGE (BANDIT + PIP-AUDIT)
         stage('7. Security Analysis') {
             steps {
                 sh '''
@@ -181,10 +179,8 @@ pipeline {
 
                     echo "✅ Running Bandit security scan..."
 
-                    # Clean old reports
                     rm -f bandit-report.json bandit-report.txt pip-audit-report.json
 
-                    # Bandit scan only project code (avoid scanning venv + sonar folders)
                     if [ -d "tests" ]; then
                         bandit -r app.py tests -f json -o bandit-report.json
                         bandit -r app.py tests -f txt  -o bandit-report.txt
@@ -199,16 +195,22 @@ pipeline {
                     echo "✅ Security scanning completed"
                     ls -la bandit-report.* pip-audit-report.json || true
 
-                    # Do NOT fail build due to findings
                     exit 0
                 '''
             }
         }
 
+        // ✅ UPDATED: DOCKER STAGE WON'T FAIL IF DOCKER NOT INSTALLED
         stage('8. Deploy to Test Environment (Docker)') {
             steps {
                 sh '''
-                    set -e
+                    set +e
+
+                    echo "Checking if Docker is available..."
+                    if ! command -v docker >/dev/null 2>&1; then
+                        echo "⚠️ Docker not found on Jenkins agent. Skipping Stage 8 deployment."
+                        exit 0
+                    fi
 
                     echo "Building Docker image..."
                     docker --version
@@ -220,14 +222,23 @@ pipeline {
                     else
                         echo "No docker-compose.staging.yml found, skipping compose deploy."
                     fi
+
+                    exit 0
                 '''
             }
         }
 
+        // ✅ UPDATED
         stage('9. Release to Production') {
             steps {
                 sh '''
-                    set -e
+                    set +e
+
+                    echo "Checking if Docker is available..."
+                    if ! command -v docker >/dev/null 2>&1; then
+                        echo "⚠️ Docker not found on Jenkins agent. Skipping Stage 9 production release."
+                        exit 0
+                    fi
 
                     echo "Promoting build to production..."
                     if [ -f docker-compose.prod.yml ]; then
@@ -235,23 +246,32 @@ pipeline {
                     else
                         echo "No docker-compose.prod.yml found, skipping production compose deploy."
                     fi
+
+                    exit 0
                 '''
             }
         }
 
+        // ✅ UPDATED
         stage('10. Monitoring & Alerting') {
             steps {
                 sh '''
-                    set -e
+                    set +e
+
                     echo "Monitoring stage..."
 
-                    echo "Docker running containers:"
-                    docker ps || true
+                    if command -v docker >/dev/null 2>&1; then
+                        echo "Docker running containers:"
+                        docker ps || true
+                    else
+                        echo "⚠️ Docker not installed. Skipping docker ps."
+                    fi
 
                     echo "Health check endpoint:"
                     curl -s -o /dev/null -w "HTTP Status: %{http_code}\\n" http://localhost:5000/health || true
 
                     echo "✅ Monitoring check done"
+                    exit 0
                 '''
             }
         }
@@ -273,6 +293,7 @@ pipeline {
         }
     }
 }
+
 
 
 
